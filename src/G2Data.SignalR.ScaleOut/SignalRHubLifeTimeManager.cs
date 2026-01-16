@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.Extensions.Hosting;
 using System.Collections.Concurrent;
+using System.Text.Json;
 
 namespace G2Data.SignalR.ScaleOut;
 
@@ -26,6 +27,8 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _groups = new();
 
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _users = new();
+
+    private readonly JsonSerializerOptions _serializerOptions = new(JsonSerializerDefaults.Web);
 
     public override Task OnConnectedAsync(HubConnectionContext connection)
     {
@@ -78,9 +81,10 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
         return Task.CompletedTask;
     }
 
-    private async Task SendToConnections(IEnumerable<string> connectionIds, string method, object[] args, IReadOnlySet<string>? exclude = null)
+    private async Task SendToConnections(IEnumerable<string> connectionIds, string method, string payload, IReadOnlySet<string>? exclude = null)
     {
         var tasks = new List<Task>();
+        var args = JsonSerializer.Deserialize<object[]>(payload, _serializerOptions)!;
         foreach (var id in connectionIds)
         {
             if (exclude?.Contains(id) == true)
@@ -123,20 +127,23 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
     public override Task SendUserAsync(string userId, string methodName, object[] args, CancellationToken cancellationToken)
         => Publish(SignalRMessageScope.Users, methodName, args, [userId], null, cancellationToken);
 
-    public override Task SendUsersAsync( IReadOnlyList<string> userIds, string methodName, object[] args, CancellationToken cancellationToken)
+    public override Task SendUsersAsync(IReadOnlyList<string> userIds, string methodName, object[] args, CancellationToken cancellationToken)
         => Publish(SignalRMessageScope.Users, methodName, args, userIds, null, cancellationToken);
 
     private Task Publish(SignalRMessageScope scope, string method, object[] args, IEnumerable<string>? targets, IReadOnlyList<string>? excluded, CancellationToken ct)
-        => _backplane.PublishAsync(new SignalRMessage
+    {
+        var payload = JsonSerializer.Serialize(args, _serializerOptions);
+        return _backplane.PublishAsync(new SignalRMessage
         {
             Id = Guid.NewGuid(),
             Scope = scope,
             Method = method,
-            Arguments = args,
+            Payload = payload,
             Targets = targets?.ToArray(),
             ExcludedConnectionIds = excluded?.ToArray(),
             SenderId = _serverId
         }, ct);
+    }
 
     private async Task ListenAsync()
     {
@@ -145,13 +152,13 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
             switch (msg.Scope)
             {
                 case SignalRMessageScope.All:
-                    await SendToConnections(_connections.Keys, msg.Method, msg.Arguments);
+                    await SendToConnections(_connections.Keys, msg.Method, msg.Payload);
                     break;
                 case SignalRMessageScope.AllExcept:
-                    await SendToConnections(_connections.Keys, msg.Method, msg.Arguments, msg.ExcludedConnectionIds!.ToHashSet());
+                    await SendToConnections(_connections.Keys, msg.Method, msg.Payload, msg.ExcludedConnectionIds!.ToHashSet());
                     break;
                 case SignalRMessageScope.Connections:
-                    await SendToConnections(msg.Targets!, msg.Method, msg.Arguments);
+                    await SendToConnections(msg.Targets!, msg.Method, msg.Payload);
                     break;
                 case SignalRMessageScope.Groups:
                     {
@@ -159,7 +166,7 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
                         {
                             if (_groups.TryGetValue(group, out var connections))
                             {
-                                await SendToConnections(connections.Keys, msg.Method, msg.Arguments);
+                                await SendToConnections(connections.Keys, msg.Method, msg.Payload);
                             }
                         }
                     }
@@ -169,7 +176,7 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
                         var g = msg.Targets![0];
                         if (_groups.TryGetValue(g, out var connections))
                         {
-                            await SendToConnections(connections.Keys, msg.Method, msg.Arguments, msg.ExcludedConnectionIds!.ToHashSet());
+                            await SendToConnections(connections.Keys, msg.Method, msg.Payload, msg.ExcludedConnectionIds!.ToHashSet());
                         }
                     }
                     break;
@@ -178,7 +185,7 @@ public sealed class SignalRHubLifeTimeManager<THub> : HubLifetimeManager<THub> w
                     {
                         if (_users.TryGetValue(user, out var conns))
                         {
-                            await SendToConnections(conns.Keys, msg.Method, msg.Arguments);
+                            await SendToConnections(conns.Keys, msg.Method, msg.Payload);
                         }
                     }
                     break;

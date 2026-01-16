@@ -8,7 +8,7 @@ public sealed class SignalRMessage
 
     public string Method { get; set; } = default!;
 
-    public object[] Arguments { get; set; } = default!;
+    public string Payload { get; set; } = default!;
 
     public string[]? Targets { get; set; }
 
